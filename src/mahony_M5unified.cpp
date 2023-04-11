@@ -51,6 +51,8 @@ float deltat = 0.0f;
 static uint32_t fsec, psec;
 static size_t fps = 0, frame_count = 0;
 
+bool use_bmm150 = false;
+
 void initGyro() {
   lcd.clear(); // 黒で塗り潰し
   lcd.setCursor(0, 0);
@@ -81,7 +83,7 @@ void setup() {
   // の4方向から設定します。(4～7を使用すると上下反転になります。)
   lcd.setRotation(1);
 
-  if (bmm150.Init() != BMM150_OK) {
+  if (use_bmm150 && bmm150.Init() != BMM150_OK) {
     M5.Lcd.setCursor(0, 10);
     M5.Lcd.print("BMM150 init failed");
     for (;;) {
@@ -90,9 +92,11 @@ void setup() {
   }
 
   initGyro();
-  bmm150.getMagnetOffset(&magoffsetX, &magoffsetY, &magoffsetZ);
-  bmm150.getMagnetScale(&magscaleX, &magscaleY, &magscaleZ);
-  bmm150.getMagnetData(&magnetX, &magnetY, &magnetZ);
+  if (use_bmm150) {
+    bmm150.getMagnetOffset(&magoffsetX, &magoffsetY, &magoffsetZ);
+    bmm150.getMagnetScale(&magscaleX, &magscaleY, &magscaleZ);
+    bmm150.getMagnetData(&magnetX, &magnetY, &magnetZ);
+  }
 
   // 必要に応じてカラーモードを設定します。（初期値は16）
   // 16の方がSPI通信量が少なく高速に動作しますが、赤と青の諧調が5bitになります。
@@ -195,10 +199,19 @@ void loop() {
   gyroZ = gyroZ - init_gyroZ;
   M5.Imu.getAccel(&accX, &accY, &accZ);
 
-  bmm150.getMagnetData(&magnetX, &magnetY, &magnetZ);
-  magnetX = (magnetX - magoffsetX) * magscaleX;
-  magnetY = (magnetY - magoffsetY) * magscaleY;
-  magnetZ = (magnetZ - magoffsetZ) * magscaleZ;
+  if (use_bmm150) {
+
+    bmm150.getMagnetData(&magnetX, &magnetY, &magnetZ);
+    magnetX = (magnetX - magoffsetX) * magscaleX;
+    magnetY = (magnetY - magoffsetY) * magscaleY;
+    magnetZ = (magnetZ - magoffsetZ) * magscaleZ;
+  } else {
+    // get from other mag sensor eventually
+    // use random noise for now ;)
+    magnetY = 1.0;
+    magnetX = 1.0;
+    magnetZ = 0.4;
+  }
 
   float head_dir = atan2(magnetX, magnetY);
   if (head_dir < 0)
