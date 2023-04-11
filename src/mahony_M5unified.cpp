@@ -4,8 +4,15 @@
 #include "quaternionFilters.h"
 #include <BMM150class.h>
 
+#include <Adafruit_FXAS21002C.h>
+#include <Adafruit_FXOS8700.h>
+
 #define MAHONY
 // #define MADGWICK
+
+#define HEADING
+// #define MAG
+// #define RPY
 
 // static M5GFX lcd;
 auto &lcd = M5.Display;         // for unified
@@ -52,6 +59,14 @@ static uint32_t fsec, psec;
 static size_t fps = 0, frame_count = 0;
 
 bool use_bmm150 = false;
+bool bmm150_avail = false;
+bool use_internal_imu = false;
+bool use_fxxs = true;
+bool fxxs_avail = false;
+
+Adafruit_FXOS8700 accelmag_fxos = Adafruit_FXOS8700(0x8700A, 0x8700B);
+Adafruit_FXAS21002C gyro_fxas = Adafruit_FXAS21002C(0x0021002C);
+sensors_event_t aevent, mevent, gevent;
 
 void initGyro() {
   lcd.clear(); // 黒で塗り潰し
@@ -59,7 +74,18 @@ void initGyro() {
   lcd.print("begin gyro calibration");
 
   for (int i = 0; i < AVERAGENUM_INIT; i++) {
-    M5.Imu.getGyro(&gyroX, &gyroY, &gyroZ);
+    if (use_internal_imu) {
+      M5.Imu.getGyro(&gyroX, &gyroY, &gyroZ);
+
+    } else {
+      if (fxxs_avail) {
+        gyro_fxas.getEvent(&gevent);
+        // FIXME: scaling/units??
+        gyroX = gevent.gyro.x;
+        gyroY = gevent.gyro.y;
+        gyroZ = gevent.gyro.z;
+      }
+    }
     init_gyroX += gyroX;
     init_gyroY += gyroY;
     init_gyroZ += gyroZ;
@@ -74,8 +100,11 @@ void setup() {
   // put your setup code here, to run once:
   auto cfg = M5.config();
   cfg.internal_imu = true;
-
+  cfg.serial_baudrate = 115200;
   M5.begin(cfg);
+  while (!Serial) {
+    delay(1);
+  }
   // checkSDUpdater(SD); // SD-Updaterを使うとき
 
   //  lcd.init();
@@ -83,11 +112,38 @@ void setup() {
   // の4方向から設定します。(4～7を使用すると上下反転になります。)
   lcd.setRotation(1);
 
-  if (use_bmm150 && bmm150.Init() != BMM150_OK) {
-    M5.Lcd.setCursor(0, 10);
-    M5.Lcd.print("BMM150 init failed");
-    for (;;) {
-      delay(100);
+  if (use_bmm150) {
+    bmm150_avail = bmm150.Init() == BMM150_OK;
+    if (!bmm150_avail) {
+      M5.Lcd.setCursor(0, 10);
+      M5.Lcd.print("BMM150 init failed");
+      Serial.printf("BMM150 init failed\n");
+      for (;;) {
+        delay(100);
+      }
+    }
+  }
+
+  if (use_fxxs) {
+    fxxs_avail =
+        (gyro_fxas.begin(0x21, &Wire1) || gyro_fxas.begin(0x21, &Wire)) &&
+        (accelmag_fxos.begin(0x1F, &Wire1) || accelmag_fxos.begin(0x1F, &Wire));
+    if (fxxs_avail) {
+      Serial.printf("using FXAS/FXOS IMU\n");
+
+      /* Set gyro range. (optional, default is 250 dps) */
+      // gyro_fxas.setRange(GYRO_RANGE_2000DPS);
+      /* Set accelerometer range (optional, default is 2G) */
+      // accelmag_fxos.setAccelRange(ACCEL_RANGE_8G);
+
+      /* Set the sensor mode (optional, default is hybrid mode) */
+      // accelmag_fxos.setSensorMode(ACCEL_ONLY_MODE);
+
+      /* Set the magnetometer's oversampling ratio (optional, default is 7) */
+      // accelmag_fxos.setMagOversamplingRatio(MAG_OSR_7);
+
+      /* Set the output data rate (optional, default is 100Hz) */
+      accelmag_fxos.setOutputDataRate(ODR_100HZ);
     }
   }
 
@@ -97,7 +153,21 @@ void setup() {
     bmm150.getMagnetScale(&magscaleX, &magscaleY, &magscaleZ);
     bmm150.getMagnetData(&magnetX, &magnetY, &magnetZ);
   }
+  if (use_fxxs && fxxs_avail) {
+    accelmag_fxos.getEvent(&aevent, &mevent);
+    magnetX = mevent.magnetic.x;
+    magnetY = mevent.magnetic.y;
+    magnetZ = mevent.magnetic.z;
 
+    // FIXME: get proper mag cal data
+    magoffsetX = 0.0F;
+    magoffsetY = 0.0F;
+    magoffsetZ = 0.0F;
+
+    magscaleX = 1.0F;
+    magscaleY = 1.0F;
+    magscaleZ = 1.0F;
+  }
   // 必要に応じてカラーモードを設定します。（初期値は16）
   // 16の方がSPI通信量が少なく高速に動作しますが、赤と青の諧調が5bitになります。
   lcd.setColorDepth(16);
@@ -191,27 +261,37 @@ void compassplot(float a) {
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
   M5.update();
-  M5.Imu.getGyro(&gyroX, &gyroY, &gyroZ);
+
+  if (use_internal_imu) {
+    M5.Imu.getGyro(&gyroX, &gyroY, &gyroZ);
+    M5.Imu.getAccel(&accX, &accY, &accZ);
+  }
+  if (use_bmm150) {
+    bmm150.getMagnetData(&magnetX, &magnetY, &magnetZ);
+  }
+  if (use_fxxs && fxxs_avail) {
+    gyro_fxas.getEvent(&gevent);
+    gyroX = gevent.gyro.x;
+    gyroY = gevent.gyro.y;
+    gyroZ = gevent.gyro.z;
+
+    accelmag_fxos.getEvent(&aevent, &mevent);
+    accX = aevent.acceleration.x;
+    accY = aevent.acceleration.y;
+    accZ = aevent.acceleration.z;
+
+    magnetX = mevent.magnetic.x;
+    magnetY = mevent.magnetic.y;
+    magnetZ = mevent.magnetic.z;
+  }
   gyroX = gyroX - init_gyroX;
   gyroY = gyroY - init_gyroY;
   gyroZ = gyroZ - init_gyroZ;
-  M5.Imu.getAccel(&accX, &accY, &accZ);
 
-  if (use_bmm150) {
-
-    bmm150.getMagnetData(&magnetX, &magnetY, &magnetZ);
-    magnetX = (magnetX - magoffsetX) * magscaleX;
-    magnetY = (magnetY - magoffsetY) * magscaleY;
-    magnetZ = (magnetZ - magoffsetZ) * magscaleZ;
-  } else {
-    // get from other mag sensor eventually
-    // use random noise for now ;)
-    magnetY = 1.0;
-    magnetX = 1.0;
-    magnetZ = 0.4;
-  }
+  magnetX = (magnetX - magoffsetX) * magscaleX;
+  magnetY = (magnetY - magoffsetY) * magscaleY;
+  magnetZ = (magnetZ - magoffsetZ) * magscaleZ;
 
   float head_dir = atan2(magnetX, magnetY);
   if (head_dir < 0)
@@ -257,17 +337,19 @@ void loop() {
   roll *= RAD_TO_DEG;
 
 #ifdef MAG
-  Serial.printf(" %5.2f,  %5.2f,  %5.2f  \r\n", magnetX, magnetY, magnetZ);
+  Serial.printf("MAG %5.2f,  %5.2f,  %5.2f  \r\n", magnetX, magnetY, magnetZ);
 #endif
-#ifdef ANGLE
-  Serial.printf(" %5.2f  \r\n", head_dir);
+#ifdef HEADING
+  Serial.printf("HEAD %5.2f  \r\n", head_dir);
 #endif
 
   compassplot(yaw);
   // for processing display
-  Serial.printf(" %5.2f,  %5.2f,  %5.2f  \r\n", roll, pitch,
-                yaw); // to processing
+#ifdef RPY
 
+  Serial.printf("RPY %5.2f,  %5.2f,  %5.2f  \r\n", roll, pitch,
+                yaw); // to processing
+#endif
   lcd.fillTriangle(160, 29, 157, 20, 163, 20, TFT_WHITE);    //  0
   lcd.fillTriangle(251, 120, 260, 117, 260, 123, TFT_WHITE); // 90
   lcd.fillTriangle(160, 211, 163, 220, 157, 220, TFT_WHITE); // 180
@@ -302,12 +384,15 @@ void loop() {
     delay(3000);
     lcd.setCursor(0, 10);
     lcd.print("Flip + rotate core calibration");
-    bmm150.bmm150_calibrate(10000);
-    delay(100);
+    if (use_bmm150) {
 
-    bmm150.Init();
-    bmm150.getMagnetOffset(&magoffsetX, &magoffsetY, &magoffsetZ);
-    bmm150.getMagnetScale(&magscaleX, &magscaleY, &magscaleZ);
+      bmm150.bmm150_calibrate(10000);
+      delay(100);
+
+      bmm150.Init();
+      bmm150.getMagnetOffset(&magoffsetX, &magoffsetY, &magoffsetZ);
+      bmm150.getMagnetScale(&magscaleX, &magscaleY, &magscaleZ);
+    }
     lcd.clear(); // 黒で塗り潰し
   }
 }
